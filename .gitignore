@@ -2,8 +2,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+*.env
 *.pkl
 *.pdf
+mail_pdfs/*
 
 .DS_Store
 Thumbs.db
