@@ -13,9 +13,15 @@ from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
 from pypdf import PdfWriter, PdfReader
 
+from dotenv import load_dotenv
+import os
+
+# Laad de .env variabelen
+load_dotenv()
+
 # Jouw instellingen
-EMAIL = os.environ.get("EMAIL_ADRES") # verander bij ander email
-WACHTWOORD = os.environ.get("PASSWORD") # verander bij ander email
+EMAIL = os.getenv("EMAIL_ADRES") # verander bij ander email
+WACHTWOORD = os.getenv("PASSWORD") # verander bij ander email
 
 CHECK_INTERVAL = 30  # elke 30 seconden controleren
 UITVOER_MAP    = "mail_pdfs"  # map waar de PDF's worden opgeslagen
