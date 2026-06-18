@@ -86,18 +86,30 @@ def mail_lezen(verbinding, mail_id):
         ruwe_tekst = bericht.get_payload(decode=True)
         tekst      = ruwe_tekst.decode("utf-8", errors="replace")
 
-    # Als er geen tekst was, haal dan de tekst uit de HTML
+    import re
+
+    def html_strippen(invoer):
+        """Zet HTML om naar gewone tekst."""
+        invoer = re.sub(r"<br\s*/?>", "\n", invoer)        # <br> → nieuwe regel
+        invoer = re.sub(r"</p>|</div>", "\n", invoer)      # </p> → nieuwe regel
+        invoer = re.sub(r"&nbsp;", " ", invoer)             # &nbsp; → spatie
+        invoer = re.sub(r"&amp;", "&", invoer)              # &amp; → &
+        invoer = re.sub(r"&lt;", "<", invoer)               # &lt; → <
+        invoer = re.sub(r"&gt;", ">", invoer)               # &gt; → >
+        invoer = re.sub(r"<[^>]+>", "", invoer)             # alle HTML tags verwijderen
+        invoer = re.sub(r"\n{3,}", "\n\n", invoer).strip()  # overbodige lege regels
+        return invoer
+
+    # Geval 1: geen tekst maar wel HTML → HTML strippen
     if not tekst.strip() and html:
-        import re
-        tekst = re.sub(r"<br\s*/?>", "\n", html)        # <br> → nieuwe regel
-        tekst = re.sub(r"</p>|</div>", "\n", tekst)     # </p> → nieuwe regel
-        tekst = re.sub(r"&nbsp;", " ", tekst)            # &nbsp; → spatie
-        tekst = re.sub(r"&amp;", "&", tekst)             # &amp; → &
-        tekst = re.sub(r"&lt;", "<", tekst)              # &lt; → <
-        tekst = re.sub(r"&gt;", ">", tekst)              # &gt; → >
-        tekst = re.sub(r"<[^>]+>", "", tekst)            # alle overige HTML tags verwijderen
-        tekst = re.sub(r"\n{3,}", "\n\n", tekst).strip() # meerdere lege regels samenvoegen
+        tekst = html_strippen(html)
         print(f"    (HTML mail → tekst geëxtraheerd)")
+
+    # Geval 2: tekst bevat HTML tags → ook strippen
+    # Dit gebeurt bij mails die text/plain claimen maar toch HTML sturen
+    elif re.search(r"<[a-zA-Z]+[\s>]", tekst):
+        tekst = html_strippen(tekst)
+        print(f"    (HTML in tekstveld → tags gestript)")
 
     return onderwerp, afzender, datum, tekst, bijlagen
 
