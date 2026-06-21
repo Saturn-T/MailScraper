@@ -19,16 +19,81 @@ import os
 # Laad de .env variabelen
 load_dotenv()
 
-# Jouw instellingen
-EMAIL = os.getenv("EMAIL_ADRES") # verander bij ander email
-WACHTWOORD = os.getenv("PASSWORD") # verander bij ander email
+# ─────────────────────────────────────────
+# MEERDERE ACCOUNTS INLEZEN
+# ─────────────────────────────────────────
+# In je .env zet je nu per account een genummerde set variabelen:
+#   EMAIL_ADRES_1 / PASSWORD_1 / IMAP_SERVER_1
+#   EMAIL_ADRES_2 / PASSWORD_2 / IMAP_SERVER_2
+#   ... enzovoort
+#
+# Je oude losse EMAIL_ADRES / PASSWORD blijft ook werken (wordt account 0).
+#
+# Bekende servers, zodat je IMAP_SERVER_x niet altijd hoeft op te zoeken:
+BEKENDE_SERVERS = {
+    "gmail.com":      "imap.gmail.com",
+    "outlook.com":    "outlook.office365.com",
+    "hotmail.com":    "outlook.office365.com",
+    "live.com":       "outlook.office365.com",
+    "yahoo.com":      "imap.mail.yahoo.com",
+    "icloud.com":     "imap.mail.me.com",
+    "me.com":         "imap.mail.me.com",
+    "mac.com":        "imap.mail.me.com",
+    "student.maastrichtuniversity.nl":    "outlook.office365.com",
+}
 
-CHECK_INTERVAL = 30  # elke 30 seconden controleren
-UITVOER_MAP    = "mail_pdfs"  # map waar de PDF's worden opgeslagen
+def server_raden(email_adres):
+    """Probeert de IMAP-server te raden op basis van het mailadres."""
+    domein = email_adres.split("@")[-1].lower()
+    return BEKENDE_SERVERS.get(domein)
 
-def verbinding_maken():
-    verbinding = imaplib.IMAP4_SSL("imap.gmail.com", 993)
-    verbinding.login(EMAIL, WACHTWOORD)
+def accounts_inlezen():
+    """
+    Bouwt een lijst van accounts op uit de .env.
+    Elk account is een dict met: naam, email, wachtwoord, server.
+    """
+    accounts = []
+
+    # Eerst: het oorspronkelijke enkele account (EMAIL_ADRES / PASSWORD)
+    # blijft gewoon werken, zodat bestaande .env bestanden niet kapot gaan.
+    basis_email = os.getenv("EMAIL_ADRES")
+    basis_wachtwoord = os.getenv("PASSWORD")
+    if basis_email and basis_wachtwoord:
+        server = os.getenv("IMAP_SERVER") or server_raden(basis_email) or "imap.gmail.com"
+        accounts.append({
+            "naam": basis_email,
+            "email": basis_email,
+            "wachtwoord": basis_wachtwoord,
+            "server": server,
+        })
+
+    # Daarna: genummerde accounts EMAIL_ADRES_1, EMAIL_ADRES_2, ...
+    i = 1
+    while True:
+        email_adres = os.getenv(f"EMAIL_ADRES_{i}")
+        wachtwoord  = os.getenv(f"PASSWORD_{i}")
+        if not email_adres or not wachtwoord:
+            break
+        server = os.getenv(f"IMAP_SERVER_{i}") or server_raden(email_adres) or "imap.gmail.com"
+        accounts.append({
+            "naam": email_adres,
+            "email": email_adres,
+            "wachtwoord": wachtwoord,
+            "server": server,
+        })
+        i += 1
+
+    return accounts
+
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 30))  # elke 30 seconden controleren
+UITVOER_MAP    = os.getenv("UITVOER_MAP", "mail_pdfs")  # map waar de PDF's worden opgeslagen
+
+# ─────────────────────────────────────────
+
+def verbinding_maken(account):
+    """Maakt verbinding met de mailbox van één account."""
+    verbinding = imaplib.IMAP4_SSL(account["server"], 993)
+    verbinding.login(account["email"], account["wachtwoord"])
     verbinding.select("INBOX")
     return verbinding
 
@@ -164,9 +229,12 @@ def veilige_naam(tekst):
         tekst = "geen_onderwerp"    # als er niks overblijft
     return tekst
 
-def pdf_maken(onderwerp, afzender, datum, tekst, bijlagen):
+def pdf_maken(account, onderwerp, afzender, datum, tekst, bijlagen):
     tijdstempel = datetime.now().strftime("%Y%m%d_%H%M%S")
-    mail_map    = os.path.join(UITVOER_MAP, f"{tijdstempel}_{veilige_naam(onderwerp)}")
+    # Elk account krijgt zijn eigen submap binnen UITVOER_MAP,
+    # zodat je meteen ziet via welke mailbox een mail binnenkwam.
+    account_map = os.path.join(UITVOER_MAP, veilige_naam(account["naam"]))
+    mail_map    = os.path.join(account_map, f"{tijdstempel}_{veilige_naam(onderwerp)}")
     os.makedirs(mail_map, exist_ok=True)
 
     pdf_pad   = os.path.join(mail_map, "mail.pdf")
@@ -240,7 +308,7 @@ def pdf_maken(onderwerp, afzender, datum, tekst, bijlagen):
     print(f"    ✅ Map aangemaakt: {mail_map}/")
     print(f"       mail.pdf ({grootte} KB)")
 
-def verwerk_recente_mails(verbinding):
+def verwerk_recente_mails(account, verbinding):
     """
     Zoekt bij opstarten alle ongelezen mails van de afgelopen 12 uur
     en verwerkt die meteen naar PDF.
@@ -296,31 +364,52 @@ def verwerk_recente_mails(verbinding):
         if onderwerp is None:
             continue  # was reclame, overslaan
 
-        pdf_maken(onderwerp, afzender, datum, tekst, bijlagen)
+        pdf_maken(account, onderwerp, afzender, datum, tekst, bijlagen)
 
     return verwerkte_ids
 
 # ── Starten ──────────────────────────────
-print("\nVerbinding maken...")
-try:
-    verbinding = verbinding_maken()
-except imaplib.IMAP4.error:
-    print("❌ Inloggen mislukt. Controleer je e-mailadres en app-wachtwoord.")
+accounts = accounts_inlezen()
+
+if not accounts:
+    print("❌ Geen accounts gevonden in .env")
+    print("   Zet minimaal EMAIL_ADRES en PASSWORD in je .env bestand,")
+    print("   of gebruik EMAIL_ADRES_1 / PASSWORD_1 voor meerdere accounts.")
     input("\nDruk op Enter om af te sluiten...")
     exit()
 
-print("Verbonden!\n")
+print(f"=== Mail Watcher ({len(accounts)} account(en)) ===\n")
 
-# Stap 1: verwerk ongelezen mails van afgelopen 12 uur
-print("── Ongelezen mails afgelopen 12 uur ──────────")
-verwerkte_ids = verwerk_recente_mails(verbinding)
-print(f"\n{len(verwerkte_ids)} recente mail(s) verwerkt.")
+# bekende_ids_per_account onthoudt, per account, welke mail-IDs we al kennen.
+# Zo houden we de mailboxen los van elkaar.
+bekende_ids_per_account = {}
 
-# Stap 2: onthoud alle huidige mail IDs voor live monitoring
-bekende_ids = alle_ids_ophalen(verbinding)
-verbinding.logout()
+for account in accounts:
+    print(f"Verbinding maken met {account['naam']} ({account['server']})...")
+    try:
+        verbinding = verbinding_maken(account)
+    except imaplib.IMAP4.error:
+        print(f"❌ Inloggen mislukt voor {account['naam']}. Controleer e-mailadres/wachtwoord/server.\n")
+        continue
 
-print(f"\nWachten op nieuwe mail... (check elke {CHECK_INTERVAL} seconden)")
+    print("Verbonden!\n")
+
+    # Stap 1: verwerk ongelezen mails van afgelopen 12 uur
+    print(f"── Ongelezen mails afgelopen 12 uur ({account['naam']}) ──────────")
+    verwerkte_ids = verwerk_recente_mails(account, verbinding)
+    print(f"\n{len(verwerkte_ids)} recente mail(s) verwerkt voor {account['naam']}.")
+
+    # Stap 2: onthoud alle huidige mail IDs voor live monitoring
+    bekende_ids_per_account[account["naam"]] = alle_ids_ophalen(verbinding)
+    verbinding.logout()
+    print()
+
+if not bekende_ids_per_account:
+    print("❌ Geen enkel account kon verbinden. Script stopt.")
+    input("\nDruk op Enter om af te sluiten...")
+    exit()
+
+print(f"Wachten op nieuwe mail in {len(bekende_ids_per_account)} mailbox(en)... (check elke {CHECK_INTERVAL} seconden)")
 print("Stop met Ctrl+C\n")
 
 # ── Hoofdlus ─────────────────────────────
@@ -329,25 +418,38 @@ while True:
 
     print("Controleren...", end=" ")
 
-    verbinding  = verbinding_maken()
-    huidige_ids = alle_ids_ophalen(verbinding)
-    nieuwe_ids  = huidige_ids - bekende_ids
+    totaal_nieuw = 0
 
-    if not nieuwe_ids:
-        print("geen nieuwe mail.")
+    # Loop door elk account heen en check op nieuwe mail
+    for account in accounts:
+        naam = account["naam"]
+        if naam not in bekende_ids_per_account:
+            continue  # dit account kon niet inloggen bij het opstarten
+
+        try:
+            verbinding = verbinding_maken(account)
+        except imaplib.IMAP4.error:
+            print(f"\n  ⚠️  Kan niet verbinden met {naam}, sla deze ronde over.")
+            continue
+
+        huidige_ids = alle_ids_ophalen(verbinding)
+        nieuwe_ids  = huidige_ids - bekende_ids_per_account[naam]
+
+        if nieuwe_ids:
+            totaal_nieuw += len(nieuwe_ids)
+            print(f"\n  📬 {len(nieuwe_ids)} nieuwe mail(s) op {naam}!")
+
+            for mail_id in nieuwe_ids:
+                print(f"\n  ── Nieuwe mail ({naam}) ────────────────────────")
+                onderwerp, afzender, datum, tekst, bijlagen = mail_lezen(verbinding, mail_id)
+                bekende_ids_per_account[naam].add(mail_id)
+
+                if onderwerp is None:
+                    continue  # was reclame, overslaan
+
+                pdf_maken(account, onderwerp, afzender, datum, tekst, bijlagen)
+
         verbinding.logout()
-        continue
 
-    print(f"{len(nieuwe_ids)} nieuwe mail(s)!")
-
-    for mail_id in nieuwe_ids:
-        print(f"\n  ── Nieuwe mail ────────────────────────")
-        onderwerp, afzender, datum, tekst, bijlagen = mail_lezen(verbinding, mail_id)
-        bekende_ids.add(mail_id)
-
-        if onderwerp is None:
-            continue  # was reclame, overslaan
-
-        pdf_maken(onderwerp, afzender, datum, tekst, bijlagen)
-
-    verbinding.logout()
+    if totaal_nieuw == 0:
+        print("geen nieuwe mail.")
