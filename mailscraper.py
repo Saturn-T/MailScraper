@@ -98,6 +98,8 @@ def verbinding_maken(account):
 
 def alle_ids_ophalen(verbinding):
     _, data = verbinding.search(None, "ALL")
+    if not data or not data[0]:
+        return set()
     return set(data[0].split())
 
 def header_lezen(waarde):
@@ -107,6 +109,29 @@ def header_lezen(waarde):
     if isinstance(stuk, bytes):
         return stuk.decode(codering or "utf-8", errors="replace")
     return stuk
+
+def vind_grootste_bytes(obj):
+    """
+    Zoekt recursief naar alle bytes-objecten en retourneert het grootste.
+    Bij IMAP fetch responses is de grootste bytes altijd de daadwerkelijke 
+    maildata, niet de metadata-string.
+    """
+    gevonden = []
+    
+    def _zoek(item):
+        if isinstance(item, bytes):
+            gevonden.append(item)
+        elif isinstance(item, (list, tuple)):
+            for sub in item:
+                _zoek(sub)
+    
+    _zoek(obj)
+    
+    if not gevonden:
+        return None
+    
+    # Retourneer het grootste bytes object
+    return max(gevonden, key=len)
 
 def is_reclame(bericht):
     """
@@ -139,8 +164,15 @@ def is_reclame(bericht):
     return False
 
 def mail_lezen(verbinding, mail_id):
-    _, data = verbinding.fetch(mail_id, "(RFC822)")
-    bericht = email.message_from_bytes(data[0][1])
+    _, data = verbinding.fetch(mail_id, "(BODY.PEEK[])")
+    
+    ruwe_mail = vind_grootste_bytes(data)
+
+    if not ruwe_mail or len(ruwe_mail) < 10:  # minder dan 10 bytes = geen echte mail
+        print("    ⚠️  Kon maildata niet lezen (onverwachte IMAP-response)")
+        return None, None, None, None, None
+    
+    bericht = email.message_from_bytes(ruwe_mail)
 
     onderwerp = header_lezen(bericht["Subject"]) or "(geen onderwerp)"
     afzender  = header_lezen(bericht["From"])    or "Onbekend"
@@ -169,7 +201,6 @@ def mail_lezen(verbinding, mail_id):
                 codering   = deel.get_content_charset() or "utf-8"
                 tekst     += ruwe_tekst.decode(codering, errors="replace")
             elif soort == "text/html" and not bestandsnaam:
-                # HTML versie bewaren als fallback
                 ruwe_html = deel.get_payload(decode=True)
                 codering  = deel.get_content_charset() or "utf-8"
                 html      += ruwe_html.decode(codering, errors="replace")
@@ -188,25 +219,19 @@ def mail_lezen(verbinding, mail_id):
     import re
 
     def html_strippen(invoer):
-        """Zet HTML om naar gewone tekst."""
-        invoer = re.sub(r"<br\s*/?>", "\n", invoer)        # <br> → nieuwe regel
-        invoer = re.sub(r"</p>|</div>", "\n", invoer)      # </p> → nieuwe regel
-        invoer = re.sub(r"&nbsp;", " ", invoer)             # &nbsp; → spatie
-        invoer = re.sub(r"&amp;", "&", invoer)              # &amp; → &
-        invoer = re.sub(r"&lt;", "<", invoer)               # &lt; → <
-        invoer = re.sub(r"&gt;", ">", invoer)               # &gt; → >
-        invoer = re.sub(r"<[^>]+>", "", invoer)             # alle HTML tags verwijderen
-        invoer = re.sub(r"\n{3,}", "\n\n", invoer).strip()  # overbodige lege regels
+        invoer = re.sub(r"<br\s*/?>", "\n", invoer)
+        invoer = re.sub(r"</p>|</div>", "\n", invoer)
+        invoer = re.sub(r"&nbsp;", " ", invoer)
+        invoer = re.sub(r"&amp;", "&", invoer)
+        invoer = re.sub(r"&lt;", "<", invoer)
+        invoer = re.sub(r"&gt;", ">", invoer)
+        invoer = re.sub(r"<[^>]+>", "", invoer)
+        invoer = re.sub(r"\n{3,}", "\n\n", invoer).strip()
         return invoer
 
-
-    # Geval 1: geen tekst maar wel HTML → HTML strippen
     if not tekst.strip() and html:
         tekst = html_strippen(html)
         print(f"    (HTML mail → tekst geëxtraheerd)")
-
-    # Geval 2: tekst bevat HTML tags → ook strippen
-    # Dit gebeurt bij mails die text/plain claimen maar toch HTML sturen
     elif re.search(r"<[a-zA-Z]+[\s>]", tekst):
         tekst = html_strippen(tekst)
         print(f"    (HTML in tekstveld → tags gestript)")
@@ -311,22 +336,18 @@ def verwerk_recente_mails(account, verbinding):
     """
     Zoekt bij opstarten alle ongelezen mails van de afgelopen 12 uur
     en verwerkt die meteen naar PDF.
-
-    IMAP heeft geen filter op uur, alleen op datum.
-    Dus we zoeken op UNSEEN + datum van vandaag (en gisteren als het
-    minder dan 12 uur geleden middernacht was), en filteren daarna
-    zelf op timestamp of de mail binnen 12 uur valt.
     """
     nu          = datetime.now(timezone.utc)
     grens       = nu - timedelta(hours=12)
 
-    # IMAP datum formaat: "01-Jan-2026"
-    # We zoeken op SINCE gisteren om zeker te zijn dat we niets missen
     gisteren    = (nu - timedelta(days=1)).strftime("%d-%b-%Y")
     zoekquery   = f'(UNSEEN SINCE "{gisteren}")'
 
     _, data = verbinding.search(None, zoekquery)
-    ids     = data[0].split()
+    if not data or not data[0]:
+        print("  Geen ongelezen mails gevonden in de afgelopen 12 uur.")
+        return set()
+    ids = data[0].split()
 
     if not ids:
         print("  Geen ongelezen mails gevonden in de afgelopen 12 uur.")
@@ -334,31 +355,36 @@ def verwerk_recente_mails(account, verbinding):
 
     verwerkte_ids = set()
 
+
     for mail_id in ids:
         # Haal alleen de datum header op (sneller dan de hele mail)
-        _, datum_data = verbinding.fetch(mail_id, "(BODY[HEADER.FIELDS (DATE)])")
-        datum_header  = datum_data[0][1].decode(errors="replace").strip()
-        datum_waarde  = datum_header.replace("Date:", "").replace("DATE:", "").strip()
-
+        _, datum_data = verbinding.fetch(mail_id, "(BODY.PEEK[HEADER.FIELDS (DATE)])")
+        
+        datum_waarde = ""
         try:
-            # Zet de datum om naar een datetime object
-            from email.utils import parsedate_to_datetime
-            mail_tijd = parsedate_to_datetime(datum_waarde)
-
-            # Maak timezone-aware als dat nog niet zo is
-            if mail_tijd.tzinfo is None:
-                mail_tijd = mail_tijd.replace(tzinfo=timezone.utc)
-
-            # Controleer of de mail binnen de afgelopen 12 uur valt
-            if mail_tijd < grens:
-                continue  # Te oud, overslaan
-
+            ruwe_data = vind_grootste_bytes(datum_data)
+            if ruwe_data:
+                datum_tekst = ruwe_data.decode(errors="replace")
+                datum_waarde = datum_tekst.replace("Date:", "").replace("DATE:", "").strip()
         except Exception:
             pass  # Als we de datum niet kunnen lezen, toch verwerken
 
+        try:
+            from email.utils import parsedate_to_datetime
+            if datum_waarde:
+                mail_tijd = parsedate_to_datetime(datum_waarde)
+
+                if mail_tijd.tzinfo is None:
+                    mail_tijd = mail_tijd.replace(tzinfo=timezone.utc)
+
+                if mail_tijd < grens:
+                    continue  # Te oud, overslaan
+        except Exception:
+            pass  # Als we de datum niet kunnen parsen, toch verwerken
+
         print(f"\n  ── Recente ongelezen mail ─────────────────")
         onderwerp, afzender, datum, tekst, bijlagen = mail_lezen(verbinding, mail_id)
-        verwerkte_ids.add(mail_id)  # ook reclame markeren als 'gezien', niet steeds opnieuw checken
+        verwerkte_ids.add(mail_id)
 
         if onderwerp is None:
             continue  # was reclame, overslaan
