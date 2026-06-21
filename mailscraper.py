@@ -473,6 +473,8 @@ while True:
                     continue  # was reclame, overslaan
 
                 pdf_maken(account, onderwerp, afzender, datum, tekst, bijlagen)
+                verbinding.store(mail_id, '+FLAGS', '\\Seen')
+
 
         verbinding.logout()
 
