@@ -44,6 +44,36 @@ def header_lezen(waarde):
         return stuk.decode(codering or "utf-8", errors="replace")
     return stuk
 
+def is_reclame(bericht):
+    """
+    Controleert of een mail waarschijnlijk reclame/nieuwsbrief is.
+    Werkt voor elke mailprovider omdat het kijkt naar kenmerken
+    van de mail zelf, niet naar Gmail-specifieke labels.
+
+    Twee signalen:
+    1. List-Unsubscribe header → bijna elke nieuwsbrief/marketing-mail
+       heeft deze header. Normale persoonlijke mail heeft die niet.
+    2. Afzenderadres bevat woorden als "no-reply", "newsletter", etc.
+    """
+    # Signaal 1: List-Unsubscribe header aanwezig
+    if bericht.get("List-Unsubscribe"):
+        return True
+
+    # Signaal 2: verdachte woorden in het afzenderadres
+    afzender = (bericht.get("From") or "").lower()
+    verdachte_woorden = [
+        "no-reply", "noreply", "no.reply",
+        "newsletter", "nieuwsbrief",
+        "marketing", "promo", "promotie",
+        "notifications@", "notification@",
+        "do-not-reply", "donotreply",
+    ]
+    for woord in verdachte_woorden:
+        if woord in afzender:
+            return True
+
+    return False
+
 def mail_lezen(verbinding, mail_id):
     _, data = verbinding.fetch(mail_id, "(RFC822)")
     bericht = email.message_from_bytes(data[0][1])
@@ -55,6 +85,11 @@ def mail_lezen(verbinding, mail_id):
     print(f"    Van:       {afzender}")
     print(f"    Onderwerp: {onderwerp}")
     print(f"    Datum:     {datum}")
+
+    # Reclame/nieuwsbrief? Dan overslaan.
+    if is_reclame(bericht):
+        print(f"    ⏭️  Overgeslagen (reclame/nieuwsbrief)")
+        return None, None, None, None, None
 
     tekst    = ""
     html     = ""
@@ -100,6 +135,7 @@ def mail_lezen(verbinding, mail_id):
         invoer = re.sub(r"\n{3,}", "\n\n", invoer).strip()  # overbodige lege regels
         return invoer
 
+
     # Geval 1: geen tekst maar wel HTML → HTML strippen
     if not tekst.strip() and html:
         tekst = html_strippen(html)
@@ -114,9 +150,19 @@ def mail_lezen(verbinding, mail_id):
     return onderwerp, afzender, datum, tekst, bijlagen
 
 def veilige_naam(tekst):
+    """
+    Maakt een string geschikt als Windows-bestandsnaam/mapnaam.
+    Windows accepteert geen mappen/bestanden die eindigen op een spatie of punt.
+    """
     for teken in r'\/:*?"<>|':
         tekst = tekst.replace(teken, "_")
-    return tekst[:60]
+    tekst = tekst.strip()           # spaties aan begin/eind weghalen
+    tekst = tekst.rstrip(". ")      # Windows accepteert geen punt/spatie aan het eind
+    tekst = tekst[:60].strip()      # inkorten en nogmaals trimmen
+    tekst = tekst.rstrip(". ")      # voor het geval het afkappen weer op spatie/punt eindigt
+    if not tekst:
+        tekst = "geen_onderwerp"    # als er niks overblijft
+    return tekst
 
 def pdf_maken(onderwerp, afzender, datum, tekst, bijlagen):
     tijdstempel = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -245,8 +291,12 @@ def verwerk_recente_mails(verbinding):
 
         print(f"\n  ── Recente ongelezen mail ─────────────────")
         onderwerp, afzender, datum, tekst, bijlagen = mail_lezen(verbinding, mail_id)
+        verwerkte_ids.add(mail_id)  # ook reclame markeren als 'gezien', niet steeds opnieuw checken
+
+        if onderwerp is None:
+            continue  # was reclame, overslaan
+
         pdf_maken(onderwerp, afzender, datum, tekst, bijlagen)
-        verwerkte_ids.add(mail_id)
 
     return verwerkte_ids
 
@@ -293,7 +343,11 @@ while True:
     for mail_id in nieuwe_ids:
         print(f"\n  ── Nieuwe mail ────────────────────────")
         onderwerp, afzender, datum, tekst, bijlagen = mail_lezen(verbinding, mail_id)
-        pdf_maken(onderwerp, afzender, datum, tekst, bijlagen)
         bekende_ids.add(mail_id)
+
+        if onderwerp is None:
+            continue  # was reclame, overslaan
+
+        pdf_maken(onderwerp, afzender, datum, tekst, bijlagen)
 
     verbinding.logout()
