@@ -43,7 +43,7 @@ BEKENDE_SERVERS = {
 }
 
 def server_raden(email_adres):
-    """Probeert de IMAP-server te raden op basis van het mailadres."""
+    """Probeert de IMAP-server te laden op basis van het mailadres."""
     domein = email_adres.split("@")[-1].lower()
     return BEKENDE_SERVERS.get(domein)
 
