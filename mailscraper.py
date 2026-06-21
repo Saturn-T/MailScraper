@@ -39,7 +39,6 @@ BEKENDE_SERVERS = {
     "icloud.com":     "imap.mail.me.com",
     "me.com":         "imap.mail.me.com",
     "mac.com":        "imap.mail.me.com",
-    "student.maastrichtuniversity.nl":    "outlook.office365.com",
 }
 
 def server_raden(email_adres):
