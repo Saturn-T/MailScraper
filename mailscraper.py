@@ -12,6 +12,7 @@ from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
 from pypdf import PdfWriter, PdfReader
+import weasyprint
 
 from dotenv import load_dotenv
 import os
@@ -22,15 +23,6 @@ load_dotenv()
 # ─────────────────────────────────────────
 # MEERDERE ACCOUNTS INLEZEN
 # ─────────────────────────────────────────
-# In je .env zet je nu per account een genummerde set variabelen:
-#   EMAIL_ADRES / PASSWORD / IMAP_SERVER
-#   EMAIL_ADRES_1 / PASSWORD_1 / IMAP_SERVER_1
-#   EMAIL_ADRES_2 / PASSWORD_2 / IMAP_SERVER_2
-#   ... enzovoort
-#
-# 
-#
-# Bekende servers, zodat je IMAP_SERVER_x niet altijd hoeft op te zoeken:
 BEKENDE_SERVERS = {
     "gmail.com":      "imap.gmail.com",
     "outlook.com":    "outlook.office365.com",
@@ -43,17 +35,11 @@ BEKENDE_SERVERS = {
 }
 
 def server_raden(email_adres):
-    """Probeert de IMAP-server te laden op basis van het mailadres."""
     domein = email_adres.split("@")[-1].lower()
     return BEKENDE_SERVERS.get(domein)
 
 def accounts_inlezen():
-    """
-    Bouwt een lijst van accounts op uit de .env.
-    Elk account is een dict met: naam, email, wachtwoord, server.
-    """
     accounts = []
-    
     basis_email = os.getenv("EMAIL_ADRES")
     basis_wachtwoord = os.getenv("PASSWORD")
     if basis_email and basis_wachtwoord:
@@ -64,8 +50,6 @@ def accounts_inlezen():
             "wachtwoord": basis_wachtwoord,
             "server": server,
         })
-
-    # Daarna: genummerde accounts EMAIL_ADRES_1, EMAIL_ADRES_2, ...
     i = 1
     while True:
         email_adres = os.getenv(f"EMAIL_ADRES_{i}")
@@ -80,16 +64,14 @@ def accounts_inlezen():
             "server": server,
         })
         i += 1
-
     return accounts
 
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 30))  # elke 30 seconden controleren
-UITVOER_MAP    = os.getenv("UITVOER_MAP", "mail_pdfs")  # map waar de PDF's worden opgeslagen
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 30))
+UITVOER_MAP    = os.getenv("UITVOER_MAP", "mail_pdfs")
 
 # ─────────────────────────────────────────
 
 def verbinding_maken(account):
-    """Maakt verbinding met de mailbox van één account."""
     verbinding = imaplib.IMAP4_SSL(account["server"], 993)
     verbinding.login(account["email"], account["wachtwoord"])
     verbinding.select("INBOX")
@@ -110,47 +92,23 @@ def header_lezen(waarde):
     return stuk
 
 def vind_grootste_bytes(obj):
-    """
-    Zoekt recursief naar alle bytes-objecten en retourneert het grootste.
-    Bij IMAP fetch responses is de grootste bytes altijd de daadwerkelijke 
-    maildata, niet de metadata-string.
-    """
     gevonden = []
-    
     def _zoek(item):
         if isinstance(item, bytes):
             gevonden.append(item)
         elif isinstance(item, (list, tuple)):
             for sub in item:
                 _zoek(sub)
-    
     _zoek(obj)
-    
     if not gevonden:
         return None
-    
-    # Retourneer het grootste bytes object
     return max(gevonden, key=len)
 
 def is_reclame(bericht):
-    """
-    Controleert of een mail waarschijnlijk reclame/nieuwsbrief is.
-    Werkt voor elke mailprovider omdat het kijkt naar kenmerken
-    van de mail zelf, niet naar Gmail-specifieke labels.
-
-    Twee signalen:
-    1. List-Unsubscribe header → bijna elke nieuwsbrief/marketing-mail
-       heeft deze header. Normale persoonlijke mail heeft die niet.
-    2. Afzenderadres bevat woorden als "no-reply", "newsletter", etc.
-    """
-    # Signaal 1: List-Unsubscribe header aanwezig
     if bericht.get("List-Unsubscribe"):
         return True
-
-    # Signaal 2: verdachte woorden in het afzenderadres
     afzender = (bericht.get("From") or "").lower()
     verdachte_woorden = [
-        "no-reply", "noreply", "no.reply",
         "newsletter", "nieuwsbrief",
         "marketing", "promo", "promotie",
         "notifications@", "notification@",
@@ -159,20 +117,16 @@ def is_reclame(bericht):
     for woord in verdachte_woorden:
         if woord in afzender:
             return True
-
     return False
 
 def mail_lezen(verbinding, mail_id):
     _, data = verbinding.fetch(mail_id, "(BODY.PEEK[])")
-    
     ruwe_mail = vind_grootste_bytes(data)
-
-    if not ruwe_mail or len(ruwe_mail) < 10:  # minder dan 10 bytes = geen echte mail
+    if not ruwe_mail or len(ruwe_mail) < 10:
         print("    ⚠️  Kon maildata niet lezen (onverwachte IMAP-response)")
-        return None, None, None, None, None
-    
-    bericht = email.message_from_bytes(ruwe_mail)
+        return None, None, None, None, None, None
 
+    bericht = email.message_from_bytes(ruwe_mail)
     onderwerp = header_lezen(bericht["Subject"]) or "(geen onderwerp)"
     afzender  = header_lezen(bericht["From"])    or "Onbekend"
     datum     = bericht["Date"]                  or "Onbekend"
@@ -181,11 +135,10 @@ def mail_lezen(verbinding, mail_id):
     print(f"    Onderwerp: {onderwerp}")
     print(f"    Datum:     {datum}")
 
-    # Reclame/nieuwsbrief? Dan overslaan.
     if is_reclame(bericht):
         print(f"    ⏭️  Overgeslagen (reclame/nieuwsbrief)")
         verbinding.store(mail_id, '+FLAGS', '\\Seen')
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     tekst    = ""
     html     = ""
@@ -195,7 +148,6 @@ def mail_lezen(verbinding, mail_id):
         for deel in bericht.walk():
             soort        = deel.get_content_type()
             bestandsnaam = deel.get_filename()
-
             if soort == "text/plain" and not bestandsnaam:
                 ruwe_tekst = deel.get_payload(decode=True)
                 codering   = deel.get_content_charset() or "utf-8"
@@ -229,34 +181,48 @@ def mail_lezen(verbinding, mail_id):
         invoer = re.sub(r"\n{3,}", "\n\n", invoer).strip()
         return invoer
 
+    # Controleer of tekst eigenlijk HTML is
     if not tekst.strip() and html:
-        tekst = html_strippen(html)
-        print(f"    (HTML mail → tekst geëxtraheerd)")
+        print(f"    (HTML mail → WeasyPrint)")
     elif re.search(r"<[a-zA-Z]+[\s>]", tekst):
-        tekst = html_strippen(tekst)
-        print(f"    (HTML in tekstveld → tags gestript)")
+        # tekst/plain claimt maar stuurt HTML → gebruik dat als html
+        html = tekst
+        tekst = ""
+        print(f"    (HTML in tekstveld → WeasyPrint)")
 
-    return onderwerp, afzender, datum, tekst, bijlagen
+    return onderwerp, afzender, datum, tekst, html, bijlagen
 
 def veilige_naam(tekst):
-    """
-    Maakt een string geschikt als Windows-bestandsnaam/mapnaam.
-    Windows accepteert geen mappen/bestanden die eindigen op een spatie of punt.
-    """
     for teken in r'\/:*?"<>|':
         tekst = tekst.replace(teken, "_")
-    tekst = tekst.strip()           # spaties aan begin/eind weghalen
-    tekst = tekst.rstrip(". ")      # Windows accepteert geen punt/spatie aan het eind
-    tekst = tekst[:60].strip()      # inkorten en nogmaals trimmen
-    tekst = tekst.rstrip(". ")      # voor het geval het afkappen weer op spatie/punt eindigt
+    tekst = tekst.strip()
+    tekst = tekst.rstrip(". ")
+    tekst = tekst[:60].strip()
+    tekst = tekst.rstrip(". ")
     if not tekst:
-        tekst = "geen_onderwerp"    # als er niks overblijft
+        tekst = "geen_onderwerp"
     return tekst
 
-def pdf_maken(account, onderwerp, afzender, datum, tekst, bijlagen):
+def header_html(afzender, onderwerp, datum):
+    """Bouwt een nette HTML-header voor bovenaan elke mail-PDF."""
+    def esc(t):
+        return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f"""
+    <div style="font-family: Helvetica, Arial, sans-serif; border-bottom: 2px solid #3498DB; padding-bottom: 12px; margin-bottom: 16px;">
+        <h1 style="font-size: 22px; color: #2C3E50; margin: 0 0 12px 0;">Mail Export</h1>
+        <table style="font-size: 10px; color: #555; border-collapse: collapse;">
+            <tr><td style="color: #999; padding-right: 12px; padding-bottom: 4px;">VAN</td>
+                <td style="font-weight: bold; color: #2C3E50;">{esc(afzender)}</td></tr>
+            <tr><td style="color: #999; padding-right: 12px; padding-bottom: 4px;">ONDERWERP</td>
+                <td style="font-weight: bold; color: #2C3E50;">{esc(onderwerp)}</td></tr>
+            <tr><td style="color: #999; padding-right: 12px;">DATUM</td>
+                <td style="font-weight: bold; color: #2C3E50;">{esc(datum)}</td></tr>
+        </table>
+    </div>
+    """
+
+def pdf_maken(account, onderwerp, afzender, datum, tekst, html, bijlagen):
     tijdstempel = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Elk account krijgt zijn eigen submap binnen UITVOER_MAP,
-    # zodat je meteen ziet via welke mailbox een mail binnenkwam.
     account_map = os.path.join(UITVOER_MAP, veilige_naam(account["naam"]))
     mail_map    = os.path.join(account_map, f"{tijdstempel}_{veilige_naam(onderwerp)}")
     os.makedirs(mail_map, exist_ok=True)
@@ -264,51 +230,78 @@ def pdf_maken(account, onderwerp, afzender, datum, tekst, bijlagen):
     pdf_pad   = os.path.join(mail_map, "mail.pdf")
     tijdelijk = os.path.join(mail_map, "_tijdelijk.pdf")
 
-    stijlen   = getSampleStyleSheet()
-    titel_st  = ParagraphStyle("T", parent=stijlen["Normal"],
-                    fontSize=17, fontName="Helvetica-Bold",
-                    textColor=colors.HexColor("#2C3E50"), spaceAfter=4)
-    label_st  = ParagraphStyle("L", parent=stijlen["Normal"],
-                    fontSize=9, textColor=colors.HexColor("#7F8C8D"), spaceBefore=6)
-    waarde_st = ParagraphStyle("W", parent=stijlen["Normal"],
-                    fontSize=10, fontName="Helvetica-Bold",
-                    textColor=colors.HexColor("#2C3E50"))
-    body_st   = ParagraphStyle("B", parent=stijlen["Normal"],
-                    fontSize=10, leading=16,
-                    textColor=colors.HexColor("#34495E"), spaceBefore=2)
+    if html:
+        # ── HTML mail → WeasyPrint ────────────────────────────────────
+        # Voeg onze header toe bovenaan de bestaande HTML van de mail
+        volledige_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <style>
+                @page {{ margin: 2cm 2.5cm; }}
+                body {{ font-family: Helvetica, Arial, sans-serif; font-size: 10pt; color: #333; }}
+                img  {{ max-width: 100%; height: auto; }}
+                a    {{ color: #3498DB; }}
+            </style>
+        </head>
+        <body>
+            {header_html(afzender, onderwerp, datum)}
+            {html}
+        </body>
+        </html>
+        """
+        weasyprint.HTML(string=volledige_html).write_pdf(tijdelijk)
+        print(f"    (PDF gemaakt via WeasyPrint)")
 
-    def veilig(t):
-        return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    else:
+        # ── Tekst mail → ReportLab (ongewijzigd) ─────────────────────
+        stijlen   = getSampleStyleSheet()
+        titel_st  = ParagraphStyle("T", parent=stijlen["Normal"],
+                        fontSize=17, fontName="Helvetica-Bold",
+                        textColor=colors.HexColor("#2C3E50"), spaceAfter=4)
+        label_st  = ParagraphStyle("L", parent=stijlen["Normal"],
+                        fontSize=9, textColor=colors.HexColor("#7F8C8D"), spaceBefore=6)
+        waarde_st = ParagraphStyle("W", parent=stijlen["Normal"],
+                        fontSize=10, fontName="Helvetica-Bold",
+                        textColor=colors.HexColor("#2C3E50"))
+        body_st   = ParagraphStyle("B", parent=stijlen["Normal"],
+                        fontSize=10, leading=16,
+                        textColor=colors.HexColor("#34495E"), spaceBefore=2)
 
-    flow = []
-    flow.append(Paragraph("Mail Export", titel_st))
-    flow.append(Spacer(1, 0.3*cm))
-    flow.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#3498DB")))
-    flow.append(Spacer(1, 0.3*cm))
+        def veilig(t):
+            return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    for label, waarde in [("VAN", afzender), ("ONDERWERP", onderwerp), ("DATUM", datum)]:
-        flow.append(Paragraph(label, label_st))
-        flow.append(Paragraph(veilig(waarde), waarde_st))
+        flow = []
+        flow.append(Paragraph("Mail Export", titel_st))
+        flow.append(Spacer(1, 0.3*cm))
+        flow.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#3498DB")))
+        flow.append(Spacer(1, 0.3*cm))
 
-    flow.append(Spacer(1, 0.4*cm))
-    flow.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#BDC3C7")))
-    flow.append(Spacer(1, 0.3*cm))
-    flow.append(Paragraph("Inhoud", ParagraphStyle("K", parent=stijlen["Normal"],
-                    fontSize=11, fontName="Helvetica-Bold",
-                    textColor=colors.HexColor("#2C3E50"))))
-    flow.append(Spacer(1, 0.2*cm))
+        for label, waarde in [("VAN", afzender), ("ONDERWERP", onderwerp), ("DATUM", datum)]:
+            flow.append(Paragraph(label, label_st))
+            flow.append(Paragraph(veilig(waarde), waarde_st))
 
-    for regel in tekst.splitlines():
-        if regel.strip():
-            flow.append(Paragraph(veilig(regel), body_st))
-        else:
-            flow.append(Spacer(1, 0.15*cm))
+        flow.append(Spacer(1, 0.4*cm))
+        flow.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#BDC3C7")))
+        flow.append(Spacer(1, 0.3*cm))
+        flow.append(Paragraph("Inhoud", ParagraphStyle("K", parent=stijlen["Normal"],
+                        fontSize=11, fontName="Helvetica-Bold",
+                        textColor=colors.HexColor("#2C3E50"))))
+        flow.append(Spacer(1, 0.2*cm))
 
-    doc = SimpleDocTemplate(tijdelijk, pagesize=A4,
-                            leftMargin=2.5*cm, rightMargin=2.5*cm,
-                            topMargin=2*cm,    bottomMargin=2*cm)
-    doc.build(flow)
+        for regel in tekst.splitlines():
+            if regel.strip():
+                flow.append(Paragraph(veilig(regel), body_st))
+            else:
+                flow.append(Spacer(1, 0.15*cm))
 
+        doc = SimpleDocTemplate(tijdelijk, pagesize=A4,
+                                leftMargin=2.5*cm, rightMargin=2.5*cm,
+                                topMargin=2*cm,    bottomMargin=2*cm)
+        doc.build(flow)
+
+    # ── PDF bijlagen samenvoegen (zelfde voor beide gevallen) ─────────
     schrijver = PdfWriter()
     for pagina in PdfReader(tijdelijk).pages:
         schrijver.add_page(pagina)
@@ -333,65 +326,53 @@ def pdf_maken(account, onderwerp, afzender, datum, tekst, bijlagen):
     print(f"       mail.pdf ({grootte} KB)")
 
 def verwerk_recente_mails(account, verbinding):
-    """
-    Zoekt bij opstarten alle ongelezen mails van de afgelopen 12 uur
-    en verwerkt die meteen naar PDF.
-    """
-    nu          = datetime.now(timezone.utc)
-    grens       = nu - timedelta(hours=12)
-
-    gisteren    = (nu - timedelta(days=1)).strftime("%d-%b-%Y")
-    zoekquery   = f'(UNSEEN SINCE "{gisteren}")'
+    nu      = datetime.now(timezone.utc)
+    grens   = nu - timedelta(hours=12)
+    gisteren = (nu - timedelta(days=1)).strftime("%d-%b-%Y")
+    zoekquery = f'(UNSEEN SINCE "{gisteren}")'
 
     _, data = verbinding.search(None, zoekquery)
     if not data or not data[0]:
         print("  Geen ongelezen mails gevonden in de afgelopen 12 uur.")
         return set()
     ids = data[0].split()
-
     if not ids:
         print("  Geen ongelezen mails gevonden in de afgelopen 12 uur.")
         return set()
 
     verwerkte_ids = set()
 
-
     for mail_id in ids:
-        # Haal alleen de datum header op (sneller dan de hele mail)
         _, datum_data = verbinding.fetch(mail_id, "(BODY.PEEK[HEADER.FIELDS (DATE)])")
-        
         datum_waarde = ""
         try:
             ruwe_data = vind_grootste_bytes(datum_data)
             if ruwe_data:
-                datum_tekst = ruwe_data.decode(errors="replace")
+                datum_tekst  = ruwe_data.decode(errors="replace")
                 datum_waarde = datum_tekst.replace("Date:", "").replace("DATE:", "").strip()
         except Exception:
-            pass  # Als we de datum niet kunnen lezen, toch verwerken
+            pass
 
         try:
             from email.utils import parsedate_to_datetime
             if datum_waarde:
                 mail_tijd = parsedate_to_datetime(datum_waarde)
-
                 if mail_tijd.tzinfo is None:
                     mail_tijd = mail_tijd.replace(tzinfo=timezone.utc)
-
                 if mail_tijd < grens:
-                    continue  # Te oud, overslaan
+                    continue
         except Exception:
-            pass  # Als we de datum niet kunnen parsen, toch verwerken
+            pass
 
         print(f"\n  ── Recente ongelezen mail ─────────────────")
-        onderwerp, afzender, datum, tekst, bijlagen = mail_lezen(verbinding, mail_id)
+        onderwerp, afzender, datum, tekst, html, bijlagen = mail_lezen(verbinding, mail_id)
         verwerkte_ids.add(mail_id)
 
         if onderwerp is None:
-            continue  # was reclame, overslaan
+            continue
 
-        pdf_maken(account, onderwerp, afzender, datum, tekst, bijlagen)
+        pdf_maken(account, onderwerp, afzender, datum, tekst, html, bijlagen)
         verbinding.store(mail_id, '+FLAGS', '\\Seen')
-
 
     return verwerkte_ids
 
@@ -400,15 +381,12 @@ accounts = accounts_inlezen()
 
 if not accounts:
     print("❌ Geen accounts gevonden in .env")
-    print("   Zet minimaal EMAIL_ADRES en PASSWORD in je .env bestand,")
-    print("   of gebruik EMAIL_ADRES_1 / PASSWORD_1 voor meerdere accounts.")
+    print("   Zet minimaal EMAIL_ADRES en PASSWORD in je .env bestand.")
     input("\nDruk op Enter om af te sluiten...")
     exit()
 
 print(f"=== Mail Watcher ({len(accounts)} account(en)) ===\n")
 
-# bekende_ids_per_account onthoudt, per account, welke mail-IDs we al kennen.
-# Zo houden we de mailboxen los van elkaar.
 bekende_ids_per_account = {}
 
 for account in accounts:
@@ -421,12 +399,10 @@ for account in accounts:
 
     print("Verbonden!\n")
 
-    # Stap 1: verwerk ongelezen mails van afgelopen 12 uur
     print(f"── Ongelezen mails afgelopen 12 uur ({account['naam']}) ──────────")
     verwerkte_ids = verwerk_recente_mails(account, verbinding)
     print(f"\n{len(verwerkte_ids)} recente mail(s) verwerkt voor {account['naam']}.")
 
-    # Stap 2: onthoud alle huidige mail IDs voor live monitoring
     bekende_ids_per_account[account["naam"]] = alle_ids_ophalen(verbinding)
     verbinding.logout()
     print()
@@ -447,11 +423,10 @@ while True:
 
     totaal_nieuw = 0
 
-    # Loop door elk account heen en check op nieuwe mail
     for account in accounts:
         naam = account["naam"]
         if naam not in bekende_ids_per_account:
-            continue  # dit account kon niet inloggen bij het opstarten
+            continue
 
         try:
             verbinding = verbinding_maken(account)
@@ -468,15 +443,14 @@ while True:
 
             for mail_id in nieuwe_ids:
                 print(f"\n  ── Nieuwe mail ({naam}) ────────────────────────")
-                onderwerp, afzender, datum, tekst, bijlagen = mail_lezen(verbinding, mail_id)
+                onderwerp, afzender, datum, tekst, html, bijlagen = mail_lezen(verbinding, mail_id)
                 bekende_ids_per_account[naam].add(mail_id)
 
                 if onderwerp is None:
-                    continue  # was reclame, overslaan
+                    continue
 
-                pdf_maken(account, onderwerp, afzender, datum, tekst, bijlagen)
+                pdf_maken(account, onderwerp, afzender, datum, tekst, html, bijlagen)
                 verbinding.store(mail_id, '+FLAGS', '\\Seen')
-
 
         verbinding.logout()
 
