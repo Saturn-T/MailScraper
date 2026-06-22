@@ -23,11 +23,12 @@ load_dotenv()
 # MEERDERE ACCOUNTS INLEZEN
 # ─────────────────────────────────────────
 # In je .env zet je nu per account een genummerde set variabelen:
+#   EMAIL_ADRES / PASSWORD / IMAP_SERVER
 #   EMAIL_ADRES_1 / PASSWORD_1 / IMAP_SERVER_1
 #   EMAIL_ADRES_2 / PASSWORD_2 / IMAP_SERVER_2
 #   ... enzovoort
 #
-# Je oude losse EMAIL_ADRES / PASSWORD blijft ook werken (wordt account 0).
+# 
 #
 # Bekende servers, zodat je IMAP_SERVER_x niet altijd hoeft op te zoeken:
 BEKENDE_SERVERS = {
@@ -52,9 +53,7 @@ def accounts_inlezen():
     Elk account is een dict met: naam, email, wachtwoord, server.
     """
     accounts = []
-
-    # Eerst: het oorspronkelijke enkele account (EMAIL_ADRES / PASSWORD)
-    # blijft gewoon werken, zodat bestaande .env bestanden niet kapot gaan.
+    
     basis_email = os.getenv("EMAIL_ADRES")
     basis_wachtwoord = os.getenv("PASSWORD")
     if basis_email and basis_wachtwoord:
