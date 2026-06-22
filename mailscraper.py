@@ -185,6 +185,7 @@ def mail_lezen(verbinding, mail_id):
     # Reclame/nieuwsbrief? Dan overslaan.
     if is_reclame(bericht):
         print(f"    ⏭️  Overgeslagen (reclame/nieuwsbrief)")
+        verbinding.store(mail_id, '+FLAGS', '\\Seen')
         return None, None, None, None, None
 
     tekst    = ""
@@ -390,6 +391,8 @@ def verwerk_recente_mails(account, verbinding):
             continue  # was reclame, overslaan
 
         pdf_maken(account, onderwerp, afzender, datum, tekst, bijlagen)
+        verbinding.store(mail_id, '+FLAGS', '\\Seen')
+
 
     return verwerkte_ids
 
