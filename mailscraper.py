@@ -12,7 +12,7 @@ from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
 from pypdf import PdfWriter, PdfReader
-import weasyprint
+from bs4 import BeautifulSoup
 
 from dotenv import load_dotenv
 import os
@@ -203,23 +203,108 @@ def veilige_naam(tekst):
         tekst = "geen_onderwerp"
     return tekst
 
-def header_html(afzender, onderwerp, datum):
-    """Bouwt een nette HTML-header voor bovenaan elke mail-PDF."""
-    def esc(t):
-        return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return f"""
-    <div style="font-family: Helvetica, Arial, sans-serif; border-bottom: 2px solid #3498DB; padding-bottom: 12px; margin-bottom: 16px;">
-        <h1 style="font-size: 22px; color: #2C3E50; margin: 0 0 12px 0;">Mail Export</h1>
-        <table style="font-size: 10px; color: #555; border-collapse: collapse;">
-            <tr><td style="color: #999; padding-right: 12px; padding-bottom: 4px;">VAN</td>
-                <td style="font-weight: bold; color: #2C3E50;">{esc(afzender)}</td></tr>
-            <tr><td style="color: #999; padding-right: 12px; padding-bottom: 4px;">ONDERWERP</td>
-                <td style="font-weight: bold; color: #2C3E50;">{esc(onderwerp)}</td></tr>
-            <tr><td style="color: #999; padding-right: 12px;">DATUM</td>
-                <td style="font-weight: bold; color: #2C3E50;">{esc(datum)}</td></tr>
-        </table>
-    </div>
+def html_naar_alineas(html):
     """
+    Zet HTML om naar een gestructureerde lijst van alinea-objecten voor ReportLab.
+    Behoudt: vetgedrukt, cursief, kopjes, lijsten.
+    Voorkomt dubbele regels — HTML-mails bevatten dezelfde tekst vaak 2-3x
+    (desktop/mobiel/fallback versie). We onthouden welke teksten al gezien zijn.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Verwijder onzichtbare elementen en Microsoft conditional comments
+    for tag in soup.find_all(["script", "style", "head", "meta", "link"]):
+        tag.decompose()
+
+    # Verwijder verborgen elementen (display:none) — die bevatten de fallback-kopieën
+    for tag in soup.find_all(style=True):
+        stijl = tag.get("style", "").lower().replace(" ", "")
+        if "display:none" in stijl or "visibility:hidden" in stijl or "mso-hide:all" in stijl:
+            tag.decompose()
+
+    # Verwijder elementen met aria-hidden of hidden attribuut
+    for tag in soup.find_all(attrs={"aria-hidden": "true"}):
+        tag.decompose()
+    for tag in soup.find_all(attrs={"hidden": True}):
+        tag.decompose()
+
+    alineas = []
+    geziene_teksten = set()  # bijhouden wat we al hebben toegevoegd
+
+    def esc(t):
+        return (t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def tag_naar_tekst(tag):
+        if isinstance(tag, str):
+            return esc(tag)
+        naam = tag.name or ""
+        inhoud_delen = [tag_naar_tekst(k) for k in tag.children]
+        tekst = "".join(inhoud_delen).strip()
+        if not tekst:
+            return ""
+        if naam in ("b", "strong"):
+            return f"<b>{tekst}</b>"
+        if naam in ("i", "em"):
+            return f"<i>{tekst}</i>"
+        if naam == "a":
+            href = tag.get("href", "").strip()
+            # Alleen echte http-links klikbaar maken, geen mailto/javascript/lege links
+            if href.startswith("http") and tekst:
+                return f'<a href="{href}" color="#3498DB">{tekst}</a>'
+            return tekst
+        if naam == "br":
+            return "<br/>"
+        return tekst
+
+    stijlen = getSampleStyleSheet()
+    kop_st  = ParagraphStyle("KH", parent=stijlen["Normal"],
+                  fontSize=12, fontName="Helvetica-Bold",
+                  textColor=colors.HexColor("#2C3E50"), spaceBefore=8, spaceAfter=2)
+    body_st = ParagraphStyle("KB", parent=stijlen["Normal"],
+                  fontSize=10, leading=16,
+                  textColor=colors.HexColor("#34495E"), spaceBefore=2)
+    li_st   = ParagraphStyle("KL", parent=stijlen["Normal"],
+                  fontSize=10, leading=16, leftIndent=16,
+                  textColor=colors.HexColor("#34495E"), spaceBefore=1)
+
+    # Alleen directe inhouds-tags ophalen, geen geneste containers
+    # We gebruiken find_all met recursive=False per blok zodat we
+    # geen parent én child allebei pakken
+    for tag in soup.find_all(["h1","h2","h3","h4","h5","h6","p","li"]):
+        naam  = tag.name
+        tekst = tag.get_text(separator=" ", strip=True)
+
+        # Sla leeg over
+        if not tekst or len(tekst) < 2:
+            continue
+
+        # Sla dubbele teksten over (case-insensitief, whitespace genormaliseerd)
+        sleutel = " ".join(tekst.lower().split())
+        if sleutel in geziene_teksten:
+            continue
+        geziene_teksten.add(sleutel)
+
+        # Sla technische rommel over (MSO conditional comments etc.)
+        if tekst.startswith("[if ") or tekst.startswith("<!--"):
+            continue
+
+        opgemaakte_tekst = tag_naar_tekst(tag).strip()
+        if not opgemaakte_tekst:
+            continue
+
+        try:
+            if naam in ("h1","h2","h3","h4","h5","h6"):
+                alineas.append(Paragraph(opgemaakte_tekst, kop_st))
+            elif naam == "li":
+                alineas.append(Paragraph(f"• {opgemaakte_tekst}", li_st))
+            else:
+                alineas.append(Paragraph(opgemaakte_tekst, body_st))
+            alineas.append(Spacer(1, 0.1*cm))
+        except Exception:
+            pass
+
+    return alineas
+
 
 def pdf_maken(account, onderwerp, afzender, datum, tekst, html, bijlagen):
     tijdstempel = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -230,78 +315,59 @@ def pdf_maken(account, onderwerp, afzender, datum, tekst, html, bijlagen):
     pdf_pad   = os.path.join(mail_map, "mail.pdf")
     tijdelijk = os.path.join(mail_map, "_tijdelijk.pdf")
 
+    stijlen   = getSampleStyleSheet()
+    titel_st  = ParagraphStyle("T", parent=stijlen["Normal"],
+                    fontSize=17, fontName="Helvetica-Bold",
+                    textColor=colors.HexColor("#2C3E50"), spaceAfter=4)
+    label_st  = ParagraphStyle("L", parent=stijlen["Normal"],
+                    fontSize=9, textColor=colors.HexColor("#7F8C8D"), spaceBefore=6)
+    waarde_st = ParagraphStyle("W", parent=stijlen["Normal"],
+                    fontSize=10, fontName="Helvetica-Bold",
+                    textColor=colors.HexColor("#2C3E50"))
+    body_st   = ParagraphStyle("B", parent=stijlen["Normal"],
+                    fontSize=10, leading=16,
+                    textColor=colors.HexColor("#34495E"), spaceBefore=2)
+
+    def veilig(t):
+        return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # ── Header (zelfde voor HTML en tekst mails) ──────────────────────
+    flow = []
+    flow.append(Paragraph("Mail Export", titel_st))
+    flow.append(Spacer(1, 0.3*cm))
+    flow.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#3498DB")))
+    flow.append(Spacer(1, 0.3*cm))
+
+    for label, waarde in [("VAN", afzender), ("ONDERWERP", onderwerp), ("DATUM", datum)]:
+        flow.append(Paragraph(label, label_st))
+        flow.append(Paragraph(veilig(waarde), waarde_st))
+
+    flow.append(Spacer(1, 0.4*cm))
+    flow.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#BDC3C7")))
+    flow.append(Spacer(1, 0.3*cm))
+    flow.append(Paragraph("Inhoud", ParagraphStyle("K", parent=stijlen["Normal"],
+                    fontSize=11, fontName="Helvetica-Bold",
+                    textColor=colors.HexColor("#2C3E50"))))
+    flow.append(Spacer(1, 0.2*cm))
+
     if html:
-        # ── HTML mail → WeasyPrint ────────────────────────────────────
-        # Voeg onze header toe bovenaan de bestaande HTML van de mail
-        volledige_html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <style>
-                @page {{ margin: 2cm 2.5cm; }}
-                body {{ font-family: Helvetica, Arial, sans-serif; font-size: 10pt; color: #333; }}
-                img  {{ max-width: 100%; height: auto; }}
-                a    {{ color: #3498DB; }}
-            </style>
-        </head>
-        <body>
-            {header_html(afzender, onderwerp, datum)}
-            {html}
-        </body>
-        </html>
-        """
-        weasyprint.HTML(string=volledige_html).write_pdf(tijdelijk)
-        print(f"    (PDF gemaakt via WeasyPrint)")
-
+        # ── HTML mail → BeautifulSoup → ReportLab ────────────────────
+        flow.extend(html_naar_alineas(html))
     else:
-        # ── Tekst mail → ReportLab (ongewijzigd) ─────────────────────
-        stijlen   = getSampleStyleSheet()
-        titel_st  = ParagraphStyle("T", parent=stijlen["Normal"],
-                        fontSize=17, fontName="Helvetica-Bold",
-                        textColor=colors.HexColor("#2C3E50"), spaceAfter=4)
-        label_st  = ParagraphStyle("L", parent=stijlen["Normal"],
-                        fontSize=9, textColor=colors.HexColor("#7F8C8D"), spaceBefore=6)
-        waarde_st = ParagraphStyle("W", parent=stijlen["Normal"],
-                        fontSize=10, fontName="Helvetica-Bold",
-                        textColor=colors.HexColor("#2C3E50"))
-        body_st   = ParagraphStyle("B", parent=stijlen["Normal"],
-                        fontSize=10, leading=16,
-                        textColor=colors.HexColor("#34495E"), spaceBefore=2)
-
-        def veilig(t):
-            return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-        flow = []
-        flow.append(Paragraph("Mail Export", titel_st))
-        flow.append(Spacer(1, 0.3*cm))
-        flow.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#3498DB")))
-        flow.append(Spacer(1, 0.3*cm))
-
-        for label, waarde in [("VAN", afzender), ("ONDERWERP", onderwerp), ("DATUM", datum)]:
-            flow.append(Paragraph(label, label_st))
-            flow.append(Paragraph(veilig(waarde), waarde_st))
-
-        flow.append(Spacer(1, 0.4*cm))
-        flow.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#BDC3C7")))
-        flow.append(Spacer(1, 0.3*cm))
-        flow.append(Paragraph("Inhoud", ParagraphStyle("K", parent=stijlen["Normal"],
-                        fontSize=11, fontName="Helvetica-Bold",
-                        textColor=colors.HexColor("#2C3E50"))))
-        flow.append(Spacer(1, 0.2*cm))
-
+        # ── Tekst mail → ReportLab ────────────────────────────────────
         for regel in tekst.splitlines():
             if regel.strip():
                 flow.append(Paragraph(veilig(regel), body_st))
             else:
                 flow.append(Spacer(1, 0.15*cm))
 
-        doc = SimpleDocTemplate(tijdelijk, pagesize=A4,
-                                leftMargin=2.5*cm, rightMargin=2.5*cm,
-                                topMargin=2*cm,    bottomMargin=2*cm)
-        doc.build(flow)
+    # ── PDF bouwen ────────────────────────────────────────────────────
+    doc = SimpleDocTemplate(tijdelijk, pagesize=A4,
+                            leftMargin=2.5*cm, rightMargin=2.5*cm,
+                            topMargin=2*cm,    bottomMargin=2*cm)
+    doc.build(flow)
 
-    # ── PDF bijlagen samenvoegen (zelfde voor beide gevallen) ─────────
+    # ── PDF bijlagen samenvoegen ──────────────────────────────────────
     schrijver = PdfWriter()
     for pagina in PdfReader(tijdelijk).pages:
         schrijver.add_page(pagina)
