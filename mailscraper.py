@@ -113,6 +113,7 @@ def is_reclame(bericht):
         "marketing", "promo", "promotie",
         "notifications@", "notification@",
         "do-not-reply", "donotreply",
+        "store-news", "info", "no-reply", "noreply",
     ]
     for woord in verdachte_woorden:
         if woord in afzender:
@@ -229,7 +230,7 @@ def html_naar_alineas(html):
         tag.decompose()
 
     alineas = []
-    geziene_teksten = set()  # bijhouden wat we al hebben toegevoegd
+    geziene_teksten = set()  # bijhouden wat al is toegevoegd
 
     def esc(t):
         return (t or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
